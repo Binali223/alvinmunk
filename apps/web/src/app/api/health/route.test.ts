@@ -1,6 +1,24 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { GET } from './route';
 import { rpc } from '@stellar/stellar-sdk';
+
+/** The ids the core loop needs, as `readNetworkConfig` resolves them (unset = ''). */
+const REQUIRED_IDS = {
+  reputation: 'CREP',
+  registry: 'CREG',
+  questRegistry: 'CQUEST',
+  rewards: 'CREWARDS',
+};
+
+const { state } = vi.hoisted(() => ({
+  state: {
+    configErrors: [] as string[],
+    config: {
+      network: 'testnet',
+      rpcUrl: 'https://rpc.test',
+      contracts: {} as Record<'reputation' | 'registry' | 'questRegistry' | 'rewards' | 'gate', string>,
+    },
+  },
+}));
 
 vi.mock('@stellar/stellar-sdk', () => {
   return {
@@ -9,6 +27,18 @@ vi.mock('@stellar/stellar-sdk', () => {
     },
   };
 });
+
+// The route reads the app's one resolved config; each test can change it (live getters).
+vi.mock('../../../lib/stellar', () => ({
+  get config() {
+    return state.config;
+  },
+  get configErrors() {
+    return state.configErrors;
+  },
+}));
+
+import { GET } from './route';
 
 /** A `getLatestLedger()` response whose ledger closed `ageSeconds` ago. */
 function freshLatestLedger(ageSeconds = 0) {
@@ -34,13 +64,6 @@ function healthyRpc() {
   );
 }
 
-// The ids the core loop needs; each test starts with exactly these set.
-const REQUIRED_IDS = {
-  NEXT_PUBLIC_REPUTATION_CONTRACT_ID: 'CREP',
-  NEXT_PUBLIC_REGISTRY_CONTRACT_ID: 'CREG',
-  NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID: 'CQUEST',
-  NEXT_PUBLIC_REWARDS_CONTRACT_ID: 'CREW',
-};
 const RELAYER = {
   PASSKEY_RELAYER_URL: 'https://relayer.example.test',
   PASSKEY_RELAYER_API_KEY: 'relayer-api-key-secret',
@@ -51,10 +74,8 @@ const PUSH = {
   VAPID_PRIVATE_KEY: 'vapid-private-secret',
   VAPID_SUBJECT: 'mailto:ops@example.test',
 };
-// Read by the route but not set by a test unless it says so.
+// Read from the environment by the route but not set by a test unless it says so.
 const OPTIONAL_ENV = [
-  'NEXT_PUBLIC_STELLAR_NETWORK',
-  'NEXT_PUBLIC_GATE_CONTRACT_ID',
   'NEXT_PUBLIC_PASSKEY_WALLET_WASM_HASH',
   'ATTESTER_SECRET_KEY',
   'USDC_ISSUER_SECRET_KEY',
@@ -68,7 +89,9 @@ describe('/api/health', () => {
   beforeEach(() => {
     envBak = { ...process.env };
     for (const key of OPTIONAL_ENV) delete process.env[key];
-    Object.assign(process.env, REQUIRED_IDS);
+    state.configErrors = [];
+    state.config.network = 'testnet';
+    state.config.contracts = { ...REQUIRED_IDS, gate: '' };
   });
 
   afterEach(() => {
@@ -180,9 +203,47 @@ describe('/api/health', () => {
     vi.useRealTimers();
   });
 
+  it('probes the RPC of the resolved config', async () => {
+    healthyRpc();
+    await GET();
+    expect(rpc.Server).toHaveBeenCalledWith('https://rpc.test', { allowHttp: false });
+  });
+
+  it('returns 503 with each specific reason when the network config is mixed', async () => {
+    healthyRpc();
+    state.configErrors = [
+      'NEXT_PUBLIC_NETWORK_PASSPHRASE is the testnet passphrase, but the network is mainnet',
+      'NEXT_PUBLIC_RPC_URL points at testnet, but the network is mainnet: https://soroban-testnet.stellar.org',
+    ];
+
+    const res = await GET();
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.rpc).toBe('ok'); // the RPC is fine — the config alone fails the probe
+    expect(body.configErrors).toEqual(state.configErrors);
+  });
+
+  it('reports an empty configErrors list when the config is consistent', async () => {
+    healthyRpc();
+    const body = await (await GET()).json();
+    expect(body.configErrors).toEqual([]);
+    expect(body.network).toBe('testnet');
+  });
+
+  it('still returns 503 without a rewards contract id', async () => {
+    healthyRpc();
+    state.config.contracts.rewards = '';
+    const res = await GET();
+    expect(res.status).toBe(503);
+    expect((await res.json()).contracts.rewards).toBeNull();
+  });
+
   it('reports all five contract ids and the relayer and push flags', async () => {
     healthyRpc();
-    Object.assign(process.env, RELAYER, PUSH, { NEXT_PUBLIC_GATE_CONTRACT_ID: 'CGATE' });
+    Object.assign(process.env, RELAYER, PUSH);
+    state.config.contracts.gate = 'CGATE';
 
     const res = await GET();
     expect(res.status).toBe(200);
@@ -192,7 +253,7 @@ describe('/api/health', () => {
       reputation: 'CREP',
       registry: 'CREG',
       questRegistry: 'CQUEST',
-      rewards: 'CREW',
+      rewards: 'CREWARDS',
       gate: 'CGATE',
     });
     expect(body.relayerConfigured).toBe(true);
@@ -201,27 +262,22 @@ describe('/api/health', () => {
     expect(body.warnings).toEqual([]);
   });
 
-  it.each(Object.keys(REQUIRED_IDS))('returns 503 when %s is missing', async (key) => {
+  it.each([
+    ['reputation', 'NEXT_PUBLIC_REPUTATION_CONTRACT_ID'],
+    ['registry', 'NEXT_PUBLIC_REGISTRY_CONTRACT_ID'],
+    ['questRegistry', 'NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID'],
+    ['rewards', 'NEXT_PUBLIC_REWARDS_CONTRACT_ID'],
+  ] as const)('returns 503 when the %s id is missing', async (key, envName) => {
     healthyRpc();
-    delete process.env[key];
+    state.config.contracts[key] = '';
 
     const res = await GET();
     expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.rpc).toBe('ok'); // the config alone fails the probe
-    expect(body.missing).toEqual([key]);
-  });
-
-  it('treats an empty contract id as missing', async () => {
-    healthyRpc();
-    process.env.NEXT_PUBLIC_REGISTRY_CONTRACT_ID = '';
-
-    const res = await GET();
-    expect(res.status).toBe(503);
-    const body = await res.json();
-    expect(body.contracts.registry).toBeNull();
-    expect(body.missing).toEqual(['NEXT_PUBLIC_REGISTRY_CONTRACT_ID']);
+    expect(body.contracts[key]).toBeNull();
+    expect(body.missing).toEqual([envName]);
   });
 
   it('warns about unset optional features on testnet without failing', async () => {
@@ -254,7 +310,7 @@ describe('/api/health', () => {
 
   it('requires the relayer on mainnet, where the dev wallet is disabled', async () => {
     healthyRpc();
-    process.env.NEXT_PUBLIC_STELLAR_NETWORK = 'mainnet';
+    state.config.network = 'mainnet';
 
     let res = await GET();
     expect(res.status).toBe(503);
@@ -286,7 +342,7 @@ describe('/api/health', () => {
       vi.fn().mockRejectedValue(new Error('ECONNREFUSED')),
       vi.fn().mockRejectedValue(new Error('ECONNREFUSED')),
     );
-    delete process.env.NEXT_PUBLIC_REPUTATION_CONTRACT_ID;
+    state.config.contracts.reputation = '';
 
     const res = await GET();
     expect(res.status).toBe(503);

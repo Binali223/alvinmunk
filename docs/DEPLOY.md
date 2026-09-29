@@ -135,7 +135,7 @@ These are **server-only**. Leave them unset for a minimal read/write demo; set t
 
 Minimal “it runs” config = network vars + the three contract ids + USDC SAC. Everything else is progressive enhancement.
 
-Quick sanity check after the app is up: `GET /api/health` reports all five contract ids and `attesterConfigured` / `faucetConfigured` / `relayerConfigured` / `pushConfigured` (booleans only — never the secrets). It returns 503 when the RPC is down or stalled or when anything in its `missing` list is unset: the reputation, registry, quest registry and rewards ids, plus the relayer URL and key on mainnet or once `NEXT_PUBLIC_PASSKEY_WALLET_WASM_HASH` is set. An unset gate id, relayer (elsewhere) or VAPID key only adds an entry to `warnings`.
+Quick sanity check after the app is up: `GET /api/health` reports all five contract ids and `attesterConfigured` / `faucetConfigured` / `relayerConfigured` / `pushConfigured` (booleans only — never the secrets), plus `configErrors` — every inconsistency in the network settings (a passphrase, RPC or Horizon URL for the other network, a mainnet contract id left unset), each naming its env var. It returns 503 when the RPC is down or stalled, when `configErrors` has any entry, or when anything in its `missing` list is unset: the reputation, registry, quest registry and rewards ids, plus the relayer URL and key on mainnet or once `NEXT_PUBLIC_PASSKEY_WALLET_WASM_HASH` is set. An unset gate id, relayer (elsewhere) or VAPID key only adds an entry to `warnings`.
 
 ---
 
@@ -176,7 +176,7 @@ Confirm: open `https://<your-deploy>/api/health` and walk through onboarding on 
 | --- | --- |
 | `deploy-testnet.sh` fails on build | Missing Rust/`stellar` CLI, or wrong Wasm target — CLI 25+ writes to `contracts/target/wasm32v1-none/release/` |
 | `init` / `add_attester` fails | Admin not funded, or identity name mismatch (`ADMIN=` / `ATTESTER=` must match `stellar keys` names) |
-| Health returns 503 | RPC unreachable or stalled (`rpc`), or a variable named in `missing` is unset |
+| Health returns 503 | RPC unreachable or stalled (`rpc`), an inconsistent network config (`configErrors`), or a variable named in `missing` is unset |
 | Quest verify 500 | Missing `ATTESTER_SECRET_KEY`, or secret is not the allowlisted attester |
 | Faucet 500 | Missing `USDC_ISSUER_SECRET_KEY` or wrong SAC id |
 | Passkey onboarding errors | WASM hash set but relayer URL/key missing — either set both, or unset the WASM hash to use the dev wallet |

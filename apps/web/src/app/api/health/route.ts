@@ -1,16 +1,23 @@
 /**
- * Health / readiness probe (Green-belt observability). Reports RPC reachability,
+ * Health / readiness probe (Green-belt observability). Reports RPC reachability, the
+ * resolved network config and its problems (see validateNetworkConfig),
  * attester/faucet/relayer/push config presence (NOT the secrets), and the wired contract
  * ids, so uptime checks and the ops status script have a single endpoint to hit. No auth,
  * no secrets — safe to expose.
  *
- * Returns 200 when the core loop can work: a live RPC plus the reputation, registry, quest
- * registry and rewards ids, and the passkey relayer wherever onboarding depends on it
- * (mainnet, where the dev wallet is disabled, or once the passkey wallet is enabled).
- * Otherwise 503, with `missing` naming the env vars to set. Unset optional features (gate,
- * relayer elsewhere, push) only add a `warnings` entry.
+ * Returns 200 when the core loop can work: a live RPC, a consistent network config, the
+ * reputation, registry, quest registry and rewards ids, and the passkey relayer wherever
+ * onboarding depends on it (mainnet, where the dev wallet is disabled, or once the passkey
+ * wallet is enabled). Otherwise 503. Unset optional features (gate, relayer elsewhere,
+ * push) only add a `warnings` entry.
+ *
+ * A half-applied mainnet cutover (a mainnet passphrase with a testnet RPC, a missing mainnet
+ * contract id, …) shows up here as `configErrors`, one specific reason per problem, and
+ * fails the probe — the client banner (ConfigStatusBanner) shows the same list. A missing
+ * required id or relayer variable is named in `missing`.
  */
 import { rpc } from '@stellar/stellar-sdk';
+import { config, configErrors } from '../../../lib/stellar';
 
 export const runtime = 'nodejs';
 // Read env + RPC at REQUEST time, never at build. Without this, Next statically
@@ -18,8 +25,6 @@ export const runtime = 'nodejs';
 // "Sensitive" secrets (ATTESTER_SECRET_KEY/USDC_ISSUER_SECRET_KEY) are absent, so the
 // probe would falsely report them unconfigured even though they exist at runtime.
 export const dynamic = 'force-dynamic';
-
-const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL ?? 'https://soroban-testnet.stellar.org';
 
 // Bound how long the probe waits on the RPC before giving up, so a slow/dead
 // endpoint fails the check instead of hanging the request indefinitely.
@@ -54,13 +59,13 @@ const unset = (vars: Record<string, string | undefined>) =>
   Object.keys(vars).filter((name) => !vars[name]);
 
 export async function GET(): Promise<Response> {
-  const network = process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? 'testnet';
+  const { network } = config;
   const contracts = {
-    reputation: process.env.NEXT_PUBLIC_REPUTATION_CONTRACT_ID || null,
-    registry: process.env.NEXT_PUBLIC_REGISTRY_CONTRACT_ID || null,
-    questRegistry: process.env.NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID || null,
-    rewards: process.env.NEXT_PUBLIC_REWARDS_CONTRACT_ID || null,
-    gate: process.env.NEXT_PUBLIC_GATE_CONTRACT_ID || null,
+    reputation: config.contracts.reputation || null,
+    registry: config.contracts.registry || null,
+    questRegistry: config.contracts.questRegistry || null,
+    rewards: config.contracts.rewards || null,
+    gate: config.contracts.gate || null,
   };
   // What /api/passkey-send needs to sponsor passkey transactions.
   const relayerUnset = unset({
@@ -77,6 +82,8 @@ export async function GET(): Promise<Response> {
 
   const checks: Record<string, unknown> = {
     network,
+    // Empty = the config is consistent. Each entry is a specific, actionable reason.
+    configErrors,
     attesterConfigured: Boolean(process.env.ATTESTER_SECRET_KEY),
     faucetConfigured: Boolean(process.env.USDC_ISSUER_SECRET_KEY),
     // Presence only: the relayer API key and the VAPID private key are secrets.
@@ -90,7 +97,7 @@ export async function GET(): Promise<Response> {
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   try {
-    const server = new rpc.Server(RPC_URL, { allowHttp: RPC_URL.startsWith('http://') });
+    const server = new rpc.Server(config.rpcUrl, { allowHttp: config.rpcUrl.startsWith('http://') });
 
     const timeoutPromise = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error('timeout')), RPC_TIMEOUT_MS);
@@ -158,7 +165,8 @@ export async function GET(): Promise<Response> {
   checks.missing = missing;
   checks.warnings = warnings;
 
-  const ok = rpcStatus === 'ok' && missing.length === 0;
+  // A mixed network config fails the probe on its own: every transaction would go wrong.
+  const ok = rpcStatus === 'ok' && configErrors.length === 0 && missing.length === 0;
   return new Response(JSON.stringify({ ok, ...checks }), {
     status: ok ? 200 : 503,
     headers: { 'content-type': 'application/json' },
