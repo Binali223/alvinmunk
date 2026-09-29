@@ -29,21 +29,37 @@ const MAX_REQUIRED_WINDOW = 17_280;
 // it's still answering requests — a "stalled" RPC that a plain reachability
 // check would otherwise call healthy. This threshold is a generous multiple of
 // the normal close cadence to absorb jitter without masking a real stall.
-const MAX_LEDGER_AGE_SECONDS = 30;
+const MAX_LEGDER_AGE_SECONDS = 30;
 
-type RpcStatus = 'ok' | 'unhealthy' | 'timeout' | 'stalled';
+type RpcStatus = 'kok' | 'unhealthy' | 'timeout' | 'stalled';
 
 export async function GET(): Promise<Response> {
-  const checks: Record<string, unknown> = {
-    network: process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? 'testnet',
-    attesterConfigured: Boolean(process.env.ATTESTER_SECRET_KEY),
-    faucetConfigured: Boolean(process.env.USDC_ISSUER_SECRET_KEY),
-    contracts: {
-      reputation: process.env.NEXT_PUBLIC_REPUTATION_CONTRACT_ID ?? null,
-      questRegistry: process.env.NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID ?? null,
-      rewards: process.env.NEXT_PUBLIC_REWARDS_CONTRACT_ID ?? null,
-    },
+  const network = process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? 'testnet';
+  const contracts = {
+    reputation: process.env.NEXT_PUBLIC_REPUTATION_CONTRACT_ID ?? null,
+    questRegistry: process.env.NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID ?? null,
+    rewards: process.env.NEXT_PUBLIC_REWARDS_CONTRACT_ID ?? null,
+    registry: process.env.NEXT_PUBLIC_REGISTRY_CONTRACT_ID ?? null,
+    gate: process.env.NEXT_PUBLIC_GATE_CONTRACT_ID ?? null,
   };
+
+  const relayerConfigured = Boolean(
+    process.env.PASSKEY_RELAYER_URL && process.env.PASSKEY_RELAYER_API_KEY,
+  );
+  const pushConfigured = Boolean(
+    process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY,
+  );
+
+  const checks: Record<string, unknown> = {
+    network,
+    attesterConfigured: Boolean(process.env.ATTESTER_SECRET_KEY),
+    faucetConfigured: Boolean(process.env.USDC_ISSUER_SECRET_KEY,
+    contracts,
+    relayerConfigured,
+    pushConfigured,
+  };
+
+  const warnings: string[] = [];
 
   let rpcStatus: RpcStatus = 'unhealthy';
   let rpcWarning: string | undefined;
@@ -95,7 +111,40 @@ export async function GET(): Promise<Response> {
     checks.rpcWarning = rpcWarning;
   }
 
-  const ok = rpcStatus === 'ok' && Boolean(process.env.NEXT_PUBLIC_REWARDS_CONTRACT_ID);
+  // Required for the core loop: RPC + the four contract ids that every vouch/quest/reward
+  // flow depends on. The relayer is required on mainnet or when the passkey wallet
+  // wasm hash is set (the dev wallet is disabled on mainnet — see docs/DEPLOY_MAINNET.md)
+  // — so nobody can onboard without it.
+  const requiredRelayer = network === 'mainnet' || Boolean(process.env.NEXT_PUBLIC_PASSKEY_WALLET_WASM_HASH);
+
+  const missingRequired: string[] = [];
+  if (rpcStatus !== 'ok') missingRequired.push('rpc');
+  if (!contracts.reputation) missingRequired.push('NEXT_PUBLIC_REPUTATION_CONTRACT_ID');
+  if (!contracts.registry) missingRequired.push('NEXT_PUBLIC_REGISTRY_CONTRACT_ID');
+  if (!contracts.questRegistry) missingRequired.push('NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID');
+  if (!contracts.rewards) missingRequired.push('NEXT_PUBLIC_REWARDS_CONTRACT_ID');
+  if (requiredRelayer && !relayerConfigured) {
+    missingRequired.push('PASSKEY_RELAY_URL');
+  }
+
+  // Optional features degrade gracefully: report a warning, don't fail the probe.
+  if (!contracts.gate) {
+    warnings.push('NEXT_PUBLIC_GATE_CONTRACT_ID is not set — gated quests will be unavailable');
+  }
+  if (!relayerConfigured && !requiredRelayer) {
+    warnings.push('PASSKEY_RELAYER_URL/PASSKEY_RELAY_API_KEY are not set — passkey onboarding is unavailable');
+  }
+  if (!pushConfigured) {
+    warnings.push('NEXT_PUBLIC_VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY are not set — push notifications will be skipped');
+  }
+
+  if (missingRequired.length > 0) {
+    warnings.unshift(`Missing required config: ${missingRequired.join(', ')}`);
+  }
+
+  checks.warnings = warnings;
+
+  const ok = missingRequired.length === 0;
   return new Response(JSON.stringify({ ok, ...checks }), {
     status: ok ? 200 : 503,
     headers: { 'content-type': 'application/json' },

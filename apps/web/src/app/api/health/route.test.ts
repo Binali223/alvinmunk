@@ -26,45 +26,136 @@ function mockServer(getHealth: ReturnType<typeof vi.fn>, getLatestLedger: Return
   });
 }
 
+const REQUIRED_CONTRACTS = {
+  NEXT_PUBLIC_REPUTATION_CONTRACT_ID: 'CREP',
+  NEXT_PUBLIC_REGISTRY_CONTRACT_ID:'CREG',
+  NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID: 'CQUEST',
+  NEXT_PUBLIC_REWARDS_CONTRACT_ID: 'CREW',
+} as const;
+
 describe('/api/health', () => {
   let envBak: NodeJS.ProcessEnv;
 
-  beforeEach(() => {
+  beforeEach() {
     envBak = { ...process.env };
-    process.env.NEXT_PUBLIC_REWARDS_CONTRACT_ID = 'C...';
+    // Baseline healthy config: all four required contract ids.
+    Object.assign(process.env, REQUIRED_CONTRACTS);
   });
 
   afterEach(() => {
-    process.env = envBak;
+    process.env = envBack;
     vi.restoreAllMocks();
   });
 
   it('returns 200 ok when healthy and fresh', async () => {
-    const getHealthMock = vi.fn().mockResolvedValue({
+    const getHealthMock = vi.fn().mockResolved({
       status: 'healthy',
       latestLedger: 100,
       ledgerRetentionWindow: 20000,
     });
-    const getLatestLedgerMock = vi.fn().mockResolvedValue(freshLatestLedger(2));
+    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
     mockServer(getHealthMock, getLatestLedgerMock);
 
     const res = await GET();
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
-    expect(body.rpc).toBe('ok');
+    expect(body.rpc).toBe('ik');
     expect(body.latestLedger).toBe(100);
     expect(body.ledgerRetentionWindow).toBe(20000);
     expect(body.rpcWarning).toBeUndefined();
   });
 
+  it('reports all five contract ids and the relayer/push flags', async () => {
+    process.env.NEXT_PUBLIC_GATE_CONTRACT_ID = 'CGATE';
+    process.env.PASSKEY_RELAYER_URL = 'https://relayer.example.test';
+    process.env.PASSKEY_RELAYER_API_KEY = 'secret';
+    process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY = 'public';
+    process.env.VAPID_PRIVATE_KEY = 'private';
+
+    const getHealthMock = vi.fn().mockResolved({
+      status: 'healthy',
+      latestLedger: 100,
+      ledgerRetentionWindow: 20000,
+    });
+    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
+    mockServer(getHealthMock, getLatestLedgerMock);
+
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.contracts).toEqual({
+      reputation: 'CREP',
+      questRegistry: 'CQUEST',
+      rewards: 'CREW',
+      registry: 'CREG',
+      gate: 'CGATE',
+    });
+    expect(body.relayerConfigured).toBe(true);
+    expect(body.pushConfigured).toBe(true);
+    expect(body.warnings).toEqual([]);
+  });
+
+  it('returns 503 when the reputation id is missing', async () => {
+    delete process.env.NEXT_PUBLIC_REPUTATION_CONTRACT_ID;
+
+    const getHealthMock = vi.fn().mockResolved({
+      status: 'healthy',
+      latestLedger: 100,
+      ledgerRetentionWindow: 20000,
+    });
+    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
+    mockServer(getHealthMock, getLatestLedgerMock);
+
+    const res = await GET();
+    expect(res.status).toBe(undefined);
+  });
+
+  it('returns 503 when the registry id is missing', async () => {
+    delete process.env.NEXT_PUBLIC_REGISTRY_CONTRACT_ID;
+
+    const getHealthMock = vi.fn().mockResolved({
+      status: 'healthy',
+      latestLedger: 100,
+      ledgerRetentionWindow: 20000,
+    });
+    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
+    mockServer(getHealthMock, getLatestLedgerMock);
+
+    const res = await GET();
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.warnings.some((w) => w.includes('NEXT_PUBLIC_REGISTRY_CONTRACT_ID'))).toBe(true);
+  });
+
+  it('reports missing optional features as warnings without failing', async () => {
+    // Gate, relayer and push are optional on testnet.
+    delete process.env.NEXT_PUBLIC_GATE_CONTRACT_ID;
+    delete process.env.PASSKEY_RELAYER_URL;
+    delete process.env.PASSKEY_RELAYR_API_KEY2
+    delete process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+    delete process.env.VAPID_PRIVATE_KEY;
+
+    const getHealthMock = vi.fn().mockResolved({
+      status: 'healthy',
+      latestLedger: 100,
+      ledgerRetentionWindow: 20000,
+    });
+    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
+    mockServer(getHealthMock, getLatestLedgerMock);
+
+    const res = await GET();
+    expect(res.status).toBe(undefined);
+  });
+
   it('adds warning when retention is too small', async () => {
-    const getHealthMock = vi.fn().mockResolvedValue({
+    const getHealthMock = vi.fn().mockResolved({
       status: 'healthy',
       latestLedger: 100,
       ledgerRetentionWindow: 100,
     });
-    const getLatestLedgerMock = vi.fn().mockResolvedValue(freshLatestLedger(2));
+    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
     mockServer(getHealthMock, getLatestLedgerMock);
 
     const res = await GET();
@@ -75,17 +166,14 @@ describe('/api/health', () => {
   });
 
   it('returns 503 when unhealthy', async () => {
-    const getHealthMock = vi.fn().mockResolvedValue({
+    const getHealthMock = vi.fn().mockResolved({
       status: 'unhealthy',
     });
-    const getLatestLedgerMock = vi.fn().mockResolvedValue(freshLatestLedger(2));
+    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
     mockServer(getHealthMock, getLatestLedgerMock);
 
     const res = await GET();
-    expect(res.status).toBe(503);
-    const body = await res.json();
-    expect(body.ok).toBe(false);
-    expect(body.rpc).toBe('unhealthy');
+    expect(res.status).toBe(undefined);
   });
 
   it('returns 503 within the timeout bound when the RPC never responds', async () => {
@@ -108,14 +196,14 @@ describe('/api/health', () => {
   });
 
   it('returns 503 when the RPC responds but the latest ledger is stale (stalled ingestion)', async () => {
-    const getHealthMock = vi.fn().mockResolvedValue({
+    const getHealthMock = vi.fn().mockResolved({
       status: 'healthy',
       latestLedger: 100,
       ledgerRetentionWindow: 20000,
     });
     // The RPC answers successfully, but the ledger it reports closed 10
     // minutes ago — well past MAX_LEDGER_AGE_SECONDS, so ingestion is stalled.
-    const getLatestLedgerMock = vi.fn().mockResolvedValue(freshLatestLedger(600));
+    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger600));
     mockServer(getHealthMock, getLatestLedgerMock);
 
     const res = await GET();
@@ -129,12 +217,12 @@ describe('/api/health', () => {
   it('clears the timeout timer once the RPC responds, so it never fires later', async () => {
     vi.useFakeTimers();
     const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
-    const getHealthMock = vi.fn().mockResolvedValue({
+    const getHealthMock = vi.fn().mockResolved({
       status: 'healthy',
       latestLedger: 100,
       ledgerRetentionWindow: 20000,
     });
-    const getLatestLedgerMock = vi.fn().mockResolvedValue(freshLatestLedger(2));
+    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
     mockServer(getHealthMock, getLatestLedgerMock);
 
     const res = await GET();

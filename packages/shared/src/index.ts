@@ -77,6 +77,61 @@ export interface ContractIds {
   gate: string;
 }
 
+// ── Health report (server-side probe; booleans only, never values) ──
+export interface HealthReport {
+  ok: boolean;
+  contracts: {
+    reputation: boolean;
+    registry: boolean;
+    questRegistry: boolean;
+    rewards: boolean;
+    gate: boolean;
+  };
+  relayerConfigured: boolean;
+  pushConfigured: boolean;
+  warnings: string[];
+}
+
+/** Required contract ids for the core loop (vouch, quest, reward). */
+const REQUIRED_CONTRACTS = ['reputation', 'registry', 'questRegistry', 'rewards'] as const;
+
+/**
+ * Compute the health report from env. Reports presence as booleans only — never
+ * the values themselves. `ok` is true when RPC is reachable and every required
+ * contract id is set; optional features (gate, relayer, push) surface as warnings.
+ */
+export function readHealthReport(
+  env: Record<string, string | undefined>,
+  rpcOk: boolean,
+): HealthReport {
+  const cfg = readNetworkConfig(env);
+  const contracts = {
+    reputation: Boolean(cfg.contracts.reputation),
+    registry: Boolean(cfg.contracts.registry),
+    questRegistry: Boolean(cfg.contracts.questRegistry),
+    rewards: Boolean(cfg.contracts.rewards),
+    gate: Boolean(cfg.contracts.gate),
+  };
+  const relayerConfigured = Boolean(
+    env.PASSKEY_RELAYER_URL && env.PASSKEY_RELAYER_API_KEY,
+  );
+  const pushConfigured = Boolean(
+    env.NEXT_PUBLIC_VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY,
+  );
+  const warnings: string[] = [];
+  if (!contracts.gate) warnings.push('NEXT_PUBLIC_GATE_CONTRACT_ID is not set');
+  if (!relayerConfigured) warnings.push('passkey relayer is not configured');
+  if (!pushConfigured) warnings.push('push notifications are not configured');
+  const requiredOk = REQUIRED_CONTRACTS.every((k) => contracts[k]);
+  return {
+    ok: rpcOk && requiredOk,
+    contracts,
+    relayerConfigured,
+    pushConfigured,
+    warnings,
+  };
+}
+
 export interface NetworkConfig {
   network: StellarNetwork;
   rpcUrl: string;
