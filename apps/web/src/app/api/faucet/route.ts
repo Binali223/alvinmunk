@@ -20,6 +20,7 @@ import {
 } from '@stellar/stellar-sdk';
 // The app's one resolved (and validated) network config — no per-route testnet defaults.
 import { config, misconfiguredResponse } from '../../../lib/stellar';
+import { submitSigned } from '../../../lib/submit';
 
 export const runtime = 'nodejs';
 
@@ -93,17 +94,16 @@ export async function POST(req: Request): Promise<Response> {
         .build();
       const prepared = await srpc.prepareTransaction(built);
       prepared.sign(issuer); // source = issuer = SAC admin → satisfies mint's admin auth
-      const sent = await srpc.sendTransaction(prepared);
-      if (sent.status === 'ERROR') throw new Error(JSON.stringify(sent.errorResult));
+      const hash = await submitSigned(prepared, 'faucet mint', srpc);
       for (let i = 0; i < 30; i++) {
-        const r = await srpc.getTransaction(sent.hash);
+        const r = await srpc.getTransaction(hash);
         if (r.status === 'SUCCESS') break;
         if (r.status === 'FAILED') throw new Error('mint failed on-chain');
         await new Promise((res) => setTimeout(res, 1000));
       }
       funded.add(recipient);
       logEvent({ route: 'faucet', outcome: 'ok', amount: DRIP, kind: 'sac-mint', ms: Date.now() - now });
-      return json({ ok: true, hash: sent.hash, amount: DRIP });
+      return json({ ok: true, hash, amount: DRIP });
     } catch (e) {
       logEvent({ route: 'faucet', outcome: 'error', kind: 'sac-mint', ms: Date.now() - now });
       return json({ error: e instanceof Error ? e.message : 'faucet mint failed' }, 502);

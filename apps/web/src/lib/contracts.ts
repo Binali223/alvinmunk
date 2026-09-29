@@ -19,14 +19,10 @@ import {
   xdr,
 } from '@stellar/stellar-sdk';
 import { server, networkPassphrase, config } from './stellar';
+import { submitSigned } from './submit';
 import type { Wallet } from './wallet';
 
 const BASE_FEE = '1000000'; // 0.1 XLM ceiling; simulation sets the real fee.
-
-// How many times to resubmit the same signed envelope after TRY_AGAIN_LATER.
-// Same envelope = same hash, so resubmitting is safe (idempotent).
-const TRY_AGAIN_MAX_ATTEMPTS = 5;
-const TRY_AGAIN_BACKOFF_MS = 1000;
 
 export const repId = () => config.contracts.reputation;
 export const rewardsId = () => config.contracts.rewards;
@@ -44,7 +40,7 @@ export const args = {
   bool: (b: boolean) => xdr.ScVal.scvBool(b),
   str: (s: string) => nativeToScVal(s, { type: 'string' }),
   sym: (s: string) => nativeToScVal(s, { type: 'symbol' }),
-  // Bytes / BytesN32 (claim hash, secret) — the host checks fixed length where needed.
+  // Bytes / BytesN<32> (claim hash, secret) — the host checks fixed length where needed.
   bytes: (u8: Uint8Array) => nativeToScVal(u8, { type: 'bytes' }),
 };
 
@@ -130,7 +126,7 @@ export async function invokeAndWaitHash(
   return (await submitAndWait(contractId, method, callArgs, wallet)).hash;
 }
 
-export async function submitAndWait(
+async function submitAndWait(
   contractId: string,
   method: string,
   callArgs: xdr.ScVal[],
@@ -151,46 +147,14 @@ export async function submitAndWait(
     .build();
 
   const prepared = await server.prepareTransaction(built);
-  const signedXtr = await wallet.sign(prepared.toXDR());
+  const signedXdr = await wallet.sign(prepared.toXDR());
   const signed = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
 
-  const sent = await submitWithRetry(signed, method);
+  const hash = await submitSigned(signed, `send ${method}`);
 
-  const result = await pollTransaction(sent.hash);
+  const result = await pollTransaction(hash);
   const retval = result.returnValue;
-  return { hash: sent.hash, value: retval ? scValToNative(retval) : undefined };
-}
-
-/**
- * Submit a signed envelope, resubmitting on `TRY_AGAIN_LATER`. Core returns that
- * status when it did NOT accept the tx into its queue (surge pricing, full queue,
- * or another tx from the same account already pending), so the hash will never land
- * and polling it would just burn the budget. We back off and resubmit the same
- * signed envelope (same hash, safe); after N attempts we throw a clear, retryable
- * error instead of polling. `DUPLICATE` is treated as accepted.
- */
-export async function submitWithRetry(
-  signed: Transaction,
-  method: string,
-  maxAttempts = TRY_AGAIN_MAX_ATTEMPTS,
-): Promise<rpc.Api.SendTransactionResponse> {
-  let lastStatus: string | undefined;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const sent = await server.sendTransaction(signed);
-    if (sent.status === 'ERROR') {
-      throw new Error(`send ${method} failed: ${JSON.stringify(sent.errorResult)}`);
-    }
-    if (sent.status === 'TRY_AGAIN_LATER') {
-      lastStatus = sent.status;
-      await sleep(TRY_AGAIN_BACKOFF_MS);
-      continue;
-    }
-    // PENDING | DUPLICATE -> accepted; the hash is queued and safe to poll.
-    return sent;
-  }
-  throw new Error(
-    `send ${method} rejected after ${maxAttempts} attempts: TRY_AGAIN_LATER ${lastStatus ?? '''} -- the network is busy, please try again`,
-  );
+  return { hash, value: retval ? scValToNative(retval) : undefined };
 }
 
 /** A `#[contracttype]` enum key as the contracts store it: `vec[Symbol(variant), ...fields]`. */
@@ -240,8 +204,8 @@ export async function readInstanceValue(
 
 /**
  * Poll getTransaction until it leaves NOT_FOUND; throw on FAILED. The poll budget must
- * outlast the tx's own validity window (`setTimeout(60)` above) — otherwise a slow
- * ledger makes us give up on a tx that actually lands, turning a successful claim into a
+ * outlast the tx's own validity window (`setTimeout(60)` above) — otherwise a slow ledger
+ * makes us give up on a tx that actually lands, turning a successful claim into a
  * false-negative error in the funnel.
  */
 async function pollTransaction(

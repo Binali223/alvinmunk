@@ -4,7 +4,8 @@
  * signed transaction. Cheap, classic, and demoable: FaceID -> on-chain in seconds.
  */
 import { Operation, TransactionBuilder } from '@stellar/stellar-sdk';
-import { server, networkPassphrase, submitWithRetry, waitForTransaction } from './stellar';
+import { server, networkPassphrase, waitForTransaction } from './stellar';
+import { submitSigned } from './submit';
 import type { Wallet } from './wallet';
 
 const FEE = '1000'; // stroops; sponsored in the passkey flow.
@@ -24,10 +25,10 @@ export async function recordGenesis(wallet: Wallet, handle: string): Promise<str
 
   const signedXdr = await wallet.sign(tx.toXDR());
   const signed = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
-  const sent = await submitWithRetry(signed);
+  const hash = await submitSigned(signed, 'genesis tx');
 
   // Wait for it to land so the follow-up claim tx builds on an advanced sequence
   // number (otherwise the two back-to-back txs collide with txBAD_SEQ).
-  await waitForTransaction(sent.hash);
-  return sent.hash;
+  await waitForTransaction(hash);
+  return hash;
 }

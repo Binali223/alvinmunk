@@ -1,5 +1,5 @@
 import { Account, Contract, Networks, nativeToScVal, scValToNative, xdr } from '@stellar/stellar-sdk';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { server } = vi.hoisted(() => ({
   server: {
@@ -26,7 +26,7 @@ import {
 } from './contracts';
 import type { Wallet } from './wallet';
 
-const CONTRACT = 'CBEJVYLWTU6BQDLwRXKWW6CYUISRC4SUIVURCG452CTOIANGY2N7V3WI';
+const CONTRACT = 'CBEJVYLWTU6BQDL3RXKWW6CYUISRC4SUIVURCG452CTOIANGY2N7V3WI';
 const SOURCE = 'GDIS5BDXSI2DDJNTKRZPI6MNB5XCLMN4Z6PPRPM4RQLZ3PSQ2YTERLFA';
 const u32 = (n: number) => nativeToScVal(n, { type: 'u32' });
 
@@ -41,7 +41,7 @@ describe('invokeAndWait / invokeAndWaitHash', () => {
     server.sendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'abc123' });
     server.getTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: u32(7) });
     const sign = vi.fn(async (x: string) => x);
-    const wallet: Wallet = { kind: 'freeighter', address: SOURCE, sign, signMessage: vi.fn() };
+    const wallet: Wallet = { kind: 'freighter', address: SOURCE, sign, signMessage: vi.fn() };
 
     await expect(invokeAndWait(CONTRACT, 'create_quest', [u32(1)], wallet)).resolves.toBe(7);
     await expect(invokeAndWaitHash(CONTRACT, 'create_quest', [u32(1)], wallet)).resolves.toBe(
@@ -74,45 +74,54 @@ describe('invokeAndWait / invokeAndWaitHash', () => {
     expect(wallet.sign).not.toHaveBeenCalled();
   });
 
-  it('TRY_AGAIN_LATER: resubmits the same envelope until PENDING, then polls', async () => {
-    server.getAccount.mockImplementation(async () => new Account(SOURCE, '1'));
-    server.prepareTransaction.mockImplementation(async (tx) => tx);
-    server.sendTransaction
-      .mockResolvedValueOnce({ status: 'TRY_AGAIN_LATER', hash: 'tal-1' })
-      .mockResolvedValueOnce({ status: 'TRY_AGAIN_LATER', hash: 'tal-2' })
-      .mockResolvedValue({ status: 'PENDING', hash: 'abc123' });
-    server.getTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: u32(7) });
-    const sign = vi.fn(async (x: string) => x);
-    const wallet: Wallet = { kind: 'freeighter', address: SOURCE, sign, signMessage: vi.fn() };
+  describe('when Core answers TRY_AGAIN_LATER', () => {
+    const wallet = (): Wallet => ({
+      kind: 'freighter',
+      address: SOURCE,
+      sign: vi.fn(async (x: string) => x),
+      signMessage: vi.fn(),
+    });
+    beforeEach(() => {
+      server.getAccount.mockImplementation(async () => new Account(SOURCE, '1'));
+      server.prepareTransaction.mockImplementation(async (tx) => tx);
+      vi.useFakeTimers();
+    });
+    afterEach(() => vi.useRealTimers());
 
-    await expect(invokeAndWait(CONTRACT, 'create_quest', [u32(1)], wallet)).resolves.toBe(7);
-    expect(server.sendTransaction).toHaveBeenCalledTimes(3);
-    expect(server.getTransaction).toHaveBeenCalledWith('abc123');
-  });
+    it('resubmits the same signed envelope until PENDING, then polls its hash', async () => {
+      server.sendTransaction
+        .mockResolvedValueOnce({ status: 'TRY_AGAIN_LATER', hash: 'abc123' })
+        .mockResolvedValueOnce({ status: 'TRY_AGAIN_LATER', hash: 'abc123' })
+        .mockResolvedValue({ status: 'PENDING', hash: 'abc123' });
+      server.getTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: u32(7) });
 
-  it('TRY_AGAIN_LATER: gives up with a clear, retryable error and never polls', async () => {
-    server.getAccount.mockImplementation(async () => new Account(SOURCE, '1'));
-    server.prepareTransaction.mockImplementation(async (tx) => tx);
-    server.sendTransaction.mockResolvedValue({ status: 'TRY_AGAIN_LATER', hash: 'tal' });
-    const sign = vi.fn(async (x: string) => x);
-    const wallet: Wallet = { kind: 'freeighter', address: SOURCE, sign, signMessage: vi.fn() };
+      const p = invokeAndWait(CONTRACT, 'create_quest', [u32(1)], wallet());
+      await vi.runAllTimersAsync();
+      await expect(p).resolves.toBe(7);
+      expect(server.sendTransaction).toHaveBeenCalledTimes(3);
+      const [first] = server.sendTransaction.mock.calls[0];
+      for (const [sent] of server.sendTransaction.mock.calls) expect(sent).toBe(first);
+      expect(server.getTransaction).toHaveBeenCalledWith('abc123');
+    });
 
-    await expect(invokeAndWaitHash(CONTRACT, 'create_quest', [u32(1)], wallet)).rejects.toThrow(
-      /TRY_AGAIN_LATER/,
-    );
-    expect(server.getTransaction).not.toHaveBeenCalled();
-  });
+    it('gives up with a clear, retryable error and never polls the hash', async () => {
+      server.sendTransaction.mockResolvedValue({ status: 'TRY_AGAIN_LATER', hash: 'abc123' });
 
-  it('duplicate is treated as accepted and polled', async () => {
-    server.getAccount.mockImplementation(async () => new Account(SOURCE, '1'));
-    server.prepareTransaction.mockImplementation(async (tx) => tx);
-    server.sendTransaction.mockResolvedValue({ status: 'DUPLICATE', hash: 'dup-1' });
-    server.getTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: u32(7) });
-    const sign = vi.fn(async (x: string) => x);
-    const wallet: Wallet = { kind: 'freeighter', address: SOURCE, sign, signMessage: vi.fn() };
+      const p = invokeAndWaitHash(CONTRACT, 'create_quest', [u32(1)], wallet());
+      const settled = expect(p).rejects.toThrow(/network is busy/);
+      await vi.runAllTimersAsync();
+      await settled;
+      expect(server.getTransaction).not.toHaveBeenCalled();
+    });
 
-    await expect(invokeAndWait(CONTRACT, 'create_quest', [u32(1)], wallet)).resolves.toBe(7);
-    expect(server.getTransaction).toHaveBeenCalledWith('dup-1');
+    it('treats DUPLICATE as accepted and polls its hash', async () => {
+      server.sendTransaction.mockResolvedValue({ status: 'DUPLICATE', hash: 'dup-1' });
+      server.getTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: u32(7) });
+
+      await expect(invokeAndWait(CONTRACT, 'create_quest', [u32(1)], wallet())).resolves.toBe(7);
+      expect(server.sendTransaction).toHaveBeenCalledTimes(1);
+      expect(server.getTransaction).toHaveBeenCalledWith('dup-1');
+    });
   });
 });
 
@@ -167,7 +176,7 @@ describe('direct ledger reads', () => {
         ],
       }),
     );
-    expect(scValToNative(instanceStorageValue(instance, enumKey('Admin')!)).toBe(SOURCE);
+    expect(scValToNative(instanceStorageValue(instance, enumKey('Admin'))!)).toBe(SOURCE);
     expect(instanceStorageValue(instance, enumKey('Usdc'))).toBeNull();
 
     server.getLedgerEntries.mockResolvedValue({ entries: [entry(instanceKey, instance)] });
