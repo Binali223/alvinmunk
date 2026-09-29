@@ -26,136 +26,82 @@ function mockServer(getHealth: ReturnType<typeof vi.fn>, getLatestLedger: Return
   });
 }
 
-const REQUIRED_CONTRACTS = {
+/** An RPC that is up, fresh and keeps a long enough history. */
+function healthyRpc() {
+  mockServer(
+    vi.fn().mockResolvedValue({ status: 'healthy', latestLedger: 100, ledgerRetentionWindow: 20000 }),
+    vi.fn().mockResolvedValue(freshLatestLedger(2)),
+  );
+}
+
+// The ids the core loop needs; each test starts with exactly these set.
+const REQUIRED_IDS = {
   NEXT_PUBLIC_REPUTATION_CONTRACT_ID: 'CREP',
-  NEXT_PUBLIC_REGISTRY_CONTRACT_ID:'CREG',
+  NEXT_PUBLIC_REGISTRY_CONTRACT_ID: 'CREG',
   NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID: 'CQUEST',
   NEXT_PUBLIC_REWARDS_CONTRACT_ID: 'CREW',
-} as const;
+};
+const RELAYER = {
+  PASSKEY_RELAYER_URL: 'https://relayer.example.test',
+  PASSKEY_RELAYER_API_KEY: 'relayer-api-key-secret',
+};
+const PUSH = {
+  NEXT_PUBLIC_VAPID_PUBLIC_KEY: 'vapid-public',
+  VAPID_PUBLIC_KEY: 'vapid-public',
+  VAPID_PRIVATE_KEY: 'vapid-private-secret',
+  VAPID_SUBJECT: 'mailto:ops@example.test',
+};
+// Read by the route but not set by a test unless it says so.
+const OPTIONAL_ENV = [
+  'NEXT_PUBLIC_STELLAR_NETWORK',
+  'NEXT_PUBLIC_GATE_CONTRACT_ID',
+  'NEXT_PUBLIC_PASSKEY_WALLET_WASM_HASH',
+  'ATTESTER_SECRET_KEY',
+  'USDC_ISSUER_SECRET_KEY',
+  ...Object.keys(RELAYER),
+  ...Object.keys(PUSH),
+];
 
 describe('/api/health', () => {
   let envBak: NodeJS.ProcessEnv;
 
-  beforeEach() {
+  beforeEach(() => {
     envBak = { ...process.env };
-    // Baseline healthy config: all four required contract ids.
-    Object.assign(process.env, REQUIRED_CONTRACTS);
+    for (const key of OPTIONAL_ENV) delete process.env[key];
+    Object.assign(process.env, REQUIRED_IDS);
   });
 
   afterEach(() => {
-    process.env = envBack;
+    process.env = envBak;
     vi.restoreAllMocks();
   });
 
   it('returns 200 ok when healthy and fresh', async () => {
-    const getHealthMock = vi.fn().mockResolved({
+    const getHealthMock = vi.fn().mockResolvedValue({
       status: 'healthy',
       latestLedger: 100,
       ledgerRetentionWindow: 20000,
     });
-    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
+    const getLatestLedgerMock = vi.fn().mockResolvedValue(freshLatestLedger(2));
     mockServer(getHealthMock, getLatestLedgerMock);
 
     const res = await GET();
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
-    expect(body.rpc).toBe('ik');
+    expect(body.rpc).toBe('ok');
     expect(body.latestLedger).toBe(100);
     expect(body.ledgerRetentionWindow).toBe(20000);
     expect(body.rpcWarning).toBeUndefined();
   });
 
-  it('reports all five contract ids and the relayer/push flags', async () => {
-    process.env.NEXT_PUBLIC_GATE_CONTRACT_ID = 'CGATE';
-    process.env.PASSKEY_RELAYER_URL = 'https://relayer.example.test';
-    process.env.PASSKEY_RELAYER_API_KEY = 'secret';
-    process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY = 'public';
-    process.env.VAPID_PRIVATE_KEY = 'private';
-
-    const getHealthMock = vi.fn().mockResolved({
-      status: 'healthy',
-      latestLedger: 100,
-      ledgerRetentionWindow: 20000,
-    });
-    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
-    mockServer(getHealthMock, getLatestLedgerMock);
-
-    const res = await GET();
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.contracts).toEqual({
-      reputation: 'CREP',
-      questRegistry: 'CQUEST',
-      rewards: 'CREW',
-      registry: 'CREG',
-      gate: 'CGATE',
-    });
-    expect(body.relayerConfigured).toBe(true);
-    expect(body.pushConfigured).toBe(true);
-    expect(body.warnings).toEqual([]);
-  });
-
-  it('returns 503 when the reputation id is missing', async () => {
-    delete process.env.NEXT_PUBLIC_REPUTATION_CONTRACT_ID;
-
-    const getHealthMock = vi.fn().mockResolved({
-      status: 'healthy',
-      latestLedger: 100,
-      ledgerRetentionWindow: 20000,
-    });
-    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
-    mockServer(getHealthMock, getLatestLedgerMock);
-
-    const res = await GET();
-    expect(res.status).toBe(undefined);
-  });
-
-  it('returns 503 when the registry id is missing', async () => {
-    delete process.env.NEXT_PUBLIC_REGISTRY_CONTRACT_ID;
-
-    const getHealthMock = vi.fn().mockResolved({
-      status: 'healthy',
-      latestLedger: 100,
-      ledgerRetentionWindow: 20000,
-    });
-    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
-    mockServer(getHealthMock, getLatestLedgerMock);
-
-    const res = await GET();
-    expect(res.status).toBe(503);
-    const body = await res.json();
-    expect(body.ok).toBe(false);
-    expect(body.warnings.some((w) => w.includes('NEXT_PUBLIC_REGISTRY_CONTRACT_ID'))).toBe(true);
-  });
-
-  it('reports missing optional features as warnings without failing', async () => {
-    // Gate, relayer and push are optional on testnet.
-    delete process.env.NEXT_PUBLIC_GATE_CONTRACT_ID;
-    delete process.env.PASSKEY_RELAYER_URL;
-    delete process.env.PASSKEY_RELAYR_API_KEY2
-    delete process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-    delete process.env.VAPID_PRIVATE_KEY;
-
-    const getHealthMock = vi.fn().mockResolved({
-      status: 'healthy',
-      latestLedger: 100,
-      ledgerRetentionWindow: 20000,
-    });
-    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
-    mockServer(getHealthMock, getLatestLedgerMock);
-
-    const res = await GET();
-    expect(res.status).toBe(undefined);
-  });
-
   it('adds warning when retention is too small', async () => {
-    const getHealthMock = vi.fn().mockResolved({
+    const getHealthMock = vi.fn().mockResolvedValue({
       status: 'healthy',
       latestLedger: 100,
       ledgerRetentionWindow: 100,
     });
-    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
+    const getLatestLedgerMock = vi.fn().mockResolvedValue(freshLatestLedger(2));
     mockServer(getHealthMock, getLatestLedgerMock);
 
     const res = await GET();
@@ -166,14 +112,17 @@ describe('/api/health', () => {
   });
 
   it('returns 503 when unhealthy', async () => {
-    const getHealthMock = vi.fn().mockResolved({
+    const getHealthMock = vi.fn().mockResolvedValue({
       status: 'unhealthy',
     });
-    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
+    const getLatestLedgerMock = vi.fn().mockResolvedValue(freshLatestLedger(2));
     mockServer(getHealthMock, getLatestLedgerMock);
 
     const res = await GET();
-    expect(res.status).toBe(undefined);
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.rpc).toBe('unhealthy');
   });
 
   it('returns 503 within the timeout bound when the RPC never responds', async () => {
@@ -196,14 +145,14 @@ describe('/api/health', () => {
   });
 
   it('returns 503 when the RPC responds but the latest ledger is stale (stalled ingestion)', async () => {
-    const getHealthMock = vi.fn().mockResolved({
+    const getHealthMock = vi.fn().mockResolvedValue({
       status: 'healthy',
       latestLedger: 100,
       ledgerRetentionWindow: 20000,
     });
     // The RPC answers successfully, but the ledger it reports closed 10
     // minutes ago — well past MAX_LEDGER_AGE_SECONDS, so ingestion is stalled.
-    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger600));
+    const getLatestLedgerMock = vi.fn().mockResolvedValue(freshLatestLedger(600));
     mockServer(getHealthMock, getLatestLedgerMock);
 
     const res = await GET();
@@ -217,17 +166,157 @@ describe('/api/health', () => {
   it('clears the timeout timer once the RPC responds, so it never fires later', async () => {
     vi.useFakeTimers();
     const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
-    const getHealthMock = vi.fn().mockResolved({
+    const getHealthMock = vi.fn().mockResolvedValue({
       status: 'healthy',
       latestLedger: 100,
       ledgerRetentionWindow: 20000,
     });
-    const getLatestLedgerMock = vi.fn().mockResolved(freshLatestLedger(2));
+    const getLatestLedgerMock = vi.fn().mockResolvedValue(freshLatestLedger(2));
     mockServer(getHealthMock, getLatestLedgerMock);
 
     const res = await GET();
     expect(res.status).toBe(200);
     expect(clearTimeoutSpy).toHaveBeenCalled();
     vi.useRealTimers();
+  });
+
+  it('reports all five contract ids and the relayer and push flags', async () => {
+    healthyRpc();
+    Object.assign(process.env, RELAYER, PUSH, { NEXT_PUBLIC_GATE_CONTRACT_ID: 'CGATE' });
+
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.contracts).toEqual({
+      reputation: 'CREP',
+      registry: 'CREG',
+      questRegistry: 'CQUEST',
+      rewards: 'CREW',
+      gate: 'CGATE',
+    });
+    expect(body.relayerConfigured).toBe(true);
+    expect(body.pushConfigured).toBe(true);
+    expect(body.missing).toEqual([]);
+    expect(body.warnings).toEqual([]);
+  });
+
+  it.each(Object.keys(REQUIRED_IDS))('returns 503 when %s is missing', async (key) => {
+    healthyRpc();
+    delete process.env[key];
+
+    const res = await GET();
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.rpc).toBe('ok'); // the config alone fails the probe
+    expect(body.missing).toEqual([key]);
+  });
+
+  it('treats an empty contract id as missing', async () => {
+    healthyRpc();
+    process.env.NEXT_PUBLIC_REGISTRY_CONTRACT_ID = '';
+
+    const res = await GET();
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.contracts.registry).toBeNull();
+    expect(body.missing).toEqual(['NEXT_PUBLIC_REGISTRY_CONTRACT_ID']);
+  });
+
+  it('warns about unset optional features on testnet without failing', async () => {
+    healthyRpc();
+
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.contracts.gate).toBeNull();
+    expect(body.relayerConfigured).toBe(false);
+    expect(body.pushConfigured).toBe(false);
+    expect(body.missing).toEqual([]);
+    expect(body.warnings).toEqual([
+      'NEXT_PUBLIC_GATE_CONTRACT_ID is not set: reputation gates are unavailable',
+      'PASSKEY_RELAYER_URL, PASSKEY_RELAYER_API_KEY not set: passkey onboarding is unavailable (the dev wallet is used)',
+      'NEXT_PUBLIC_VAPID_PUBLIC_KEY, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT not set: push notifications are skipped',
+    ]);
+  });
+
+  it('names only the push variables that are unset', async () => {
+    healthyRpc();
+    Object.assign(process.env, PUSH);
+    delete process.env.VAPID_SUBJECT; // /api/push/notify skips without it
+
+    const body = await (await GET()).json();
+    expect(body.pushConfigured).toBe(false);
+    expect(body.warnings).toContain('VAPID_SUBJECT not set: push notifications are skipped');
+  });
+
+  it('requires the relayer on mainnet, where the dev wallet is disabled', async () => {
+    healthyRpc();
+    process.env.NEXT_PUBLIC_STELLAR_NETWORK = 'mainnet';
+
+    let res = await GET();
+    expect(res.status).toBe(503);
+    let body = await res.json();
+    expect(body.missing).toEqual(['PASSKEY_RELAYER_URL', 'PASSKEY_RELAYER_API_KEY']);
+    expect(body.warnings.some((w: string) => w.includes('PASSKEY_RELAYER'))).toBe(false);
+
+    Object.assign(process.env, RELAYER);
+    res = await GET();
+    expect(res.status).toBe(200);
+    body = await res.json();
+    expect(body.relayerConfigured).toBe(true);
+  });
+
+  it('requires the relayer once the passkey wallet is enabled', async () => {
+    healthyRpc();
+    process.env.NEXT_PUBLIC_PASSKEY_WALLET_WASM_HASH = 'abc123';
+    process.env.PASSKEY_RELAYER_URL = RELAYER.PASSKEY_RELAYER_URL; // key still unset
+
+    const res = await GET();
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.relayerConfigured).toBe(false);
+    expect(body.missing).toEqual(['PASSKEY_RELAYER_API_KEY']);
+  });
+
+  it('reports a down RPC and missing ids together', async () => {
+    mockServer(
+      vi.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+      vi.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+    );
+    delete process.env.NEXT_PUBLIC_REPUTATION_CONTRACT_ID;
+
+    const res = await GET();
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.rpc).toBe('unhealthy');
+    expect(body.missing).toEqual(['NEXT_PUBLIC_REPUTATION_CONTRACT_ID']);
+  });
+
+  it('never echoes a secret, only whether it is set', async () => {
+    healthyRpc();
+    Object.assign(process.env, RELAYER, PUSH, {
+      ATTESTER_SECRET_KEY: 'SATTESTERSECRET',
+      USDC_ISSUER_SECRET_KEY: 'SISSUERSECRET',
+    });
+
+    const res = await GET();
+    const text = await res.text();
+    for (const secret of [
+      'SATTESTERSECRET',
+      'SISSUERSECRET',
+      RELAYER.PASSKEY_RELAYER_API_KEY,
+      RELAYER.PASSKEY_RELAYER_URL,
+      PUSH.VAPID_PRIVATE_KEY,
+    ]) {
+      expect(text).not.toContain(secret);
+    }
+    const body = JSON.parse(text);
+    expect(body.attesterConfigured).toBe(true);
+    expect(body.faucetConfigured).toBe(true);
+    expect(body.relayerConfigured).toBe(true);
+    expect(body.pushConfigured).toBe(true);
   });
 });

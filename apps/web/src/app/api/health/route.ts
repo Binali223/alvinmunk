@@ -1,8 +1,14 @@
 /**
  * Health / readiness probe (Green-belt observability). Reports RPC reachability,
- * attester+faucet config presence (NOT the secrets), and the wired contract ids, so
- * uptime checks and the ops status script have a single endpoint to hit. No auth, no
- * secrets — safe to expose. Returns 200 when the core deps look healthy, 503 otherwise.
+ * attester/faucet/relayer/push config presence (NOT the secrets), and the wired contract
+ * ids, so uptime checks and the ops status script have a single endpoint to hit. No auth,
+ * no secrets — safe to expose.
+ *
+ * Returns 200 when the core loop can work: a live RPC plus the reputation, registry, quest
+ * registry and rewards ids, and the passkey relayer wherever onboarding depends on it
+ * (mainnet, where the dev wallet is disabled, or once the passkey wallet is enabled).
+ * Otherwise 503, with `missing` naming the env vars to set. Unset optional features (gate,
+ * relayer elsewhere, push) only add a `warnings` entry.
  */
 import { rpc } from '@stellar/stellar-sdk';
 
@@ -29,37 +35,55 @@ const MAX_REQUIRED_WINDOW = 17_280;
 // it's still answering requests — a "stalled" RPC that a plain reachability
 // check would otherwise call healthy. This threshold is a generous multiple of
 // the normal close cadence to absorb jitter without masking a real stall.
-const MAX_LEGDER_AGE_SECONDS = 30;
+const MAX_LEDGER_AGE_SECONDS = 30;
 
-type RpcStatus = 'kok' | 'unhealthy' | 'timeout' | 'stalled';
+type RpcStatus = 'ok' | 'unhealthy' | 'timeout' | 'stalled';
+
+// The env var behind each contract id. Every one but the gate is required.
+const CONTRACT_ENV = {
+  reputation: 'NEXT_PUBLIC_REPUTATION_CONTRACT_ID',
+  registry: 'NEXT_PUBLIC_REGISTRY_CONTRACT_ID',
+  questRegistry: 'NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID',
+  rewards: 'NEXT_PUBLIC_REWARDS_CONTRACT_ID',
+  gate: 'NEXT_PUBLIC_GATE_CONTRACT_ID',
+} as const;
+const REQUIRED_CONTRACTS = ['reputation', 'registry', 'questRegistry', 'rewards'] as const;
+
+/** Names of the variables in `vars` that are unset or empty. */
+const unset = (vars: Record<string, string | undefined>) =>
+  Object.keys(vars).filter((name) => !vars[name]);
 
 export async function GET(): Promise<Response> {
   const network = process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? 'testnet';
   const contracts = {
-    reputation: process.env.NEXT_PUBLIC_REPUTATION_CONTRACT_ID ?? null,
-    questRegistry: process.env.NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID ?? null,
-    rewards: process.env.NEXT_PUBLIC_REWARDS_CONTRACT_ID ?? null,
-    registry: process.env.NEXT_PUBLIC_REGISTRY_CONTRACT_ID ?? null,
-    gate: process.env.NEXT_PUBLIC_GATE_CONTRACT_ID ?? null,
+    reputation: process.env.NEXT_PUBLIC_REPUTATION_CONTRACT_ID || null,
+    registry: process.env.NEXT_PUBLIC_REGISTRY_CONTRACT_ID || null,
+    questRegistry: process.env.NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID || null,
+    rewards: process.env.NEXT_PUBLIC_REWARDS_CONTRACT_ID || null,
+    gate: process.env.NEXT_PUBLIC_GATE_CONTRACT_ID || null,
   };
-
-  const relayerConfigured = Boolean(
-    process.env.PASSKEY_RELAYER_URL && process.env.PASSKEY_RELAYER_API_KEY,
-  );
-  const pushConfigured = Boolean(
-    process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY,
-  );
+  // What /api/passkey-send needs to sponsor passkey transactions.
+  const relayerUnset = unset({
+    PASSKEY_RELAYER_URL: process.env.PASSKEY_RELAYER_URL,
+    PASSKEY_RELAYER_API_KEY: process.env.PASSKEY_RELAYER_API_KEY,
+  });
+  // What /api/push/notify needs to send (it skips otherwise), plus the client's key to subscribe.
+  const pushUnset = unset({
+    NEXT_PUBLIC_VAPID_PUBLIC_KEY: process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
+    VAPID_PUBLIC_KEY: process.env.VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY: process.env.VAPID_PRIVATE_KEY,
+    VAPID_SUBJECT: process.env.VAPID_SUBJECT,
+  });
 
   const checks: Record<string, unknown> = {
     network,
     attesterConfigured: Boolean(process.env.ATTESTER_SECRET_KEY),
-    faucetConfigured: Boolean(process.env.USDC_ISSUER_SECRET_KEY,
+    faucetConfigured: Boolean(process.env.USDC_ISSUER_SECRET_KEY),
+    // Presence only: the relayer API key and the VAPID private key are secrets.
+    relayerConfigured: relayerUnset.length === 0,
+    pushConfigured: pushUnset.length === 0,
     contracts,
-    relayerConfigured,
-    pushConfigured,
   };
-
-  const warnings: string[] = [];
 
   let rpcStatus: RpcStatus = 'unhealthy';
   let rpcWarning: string | undefined;
@@ -111,40 +135,30 @@ export async function GET(): Promise<Response> {
     checks.rpcWarning = rpcWarning;
   }
 
-  // Required for the core loop: RPC + the four contract ids that every vouch/quest/reward
-  // flow depends on. The relayer is required on mainnet or when the passkey wallet
-  // wasm hash is set (the dev wallet is disabled on mainnet — see docs/DEPLOY_MAINNET.md)
-  // — so nobody can onboard without it.
-  const requiredRelayer = network === 'mainnet' || Boolean(process.env.NEXT_PUBLIC_PASSKEY_WALLET_WASM_HASH);
-
-  const missingRequired: string[] = [];
-  if (rpcStatus !== 'ok') missingRequired.push('rpc');
-  if (!contracts.reputation) missingRequired.push('NEXT_PUBLIC_REPUTATION_CONTRACT_ID');
-  if (!contracts.registry) missingRequired.push('NEXT_PUBLIC_REGISTRY_CONTRACT_ID');
-  if (!contracts.questRegistry) missingRequired.push('NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID');
-  if (!contracts.rewards) missingRequired.push('NEXT_PUBLIC_REWARDS_CONTRACT_ID');
-  if (requiredRelayer && !relayerConfigured) {
-    missingRequired.push('PASSKEY_RELAY_URL');
-  }
-
-  // Optional features degrade gracefully: report a warning, don't fail the probe.
+  // Onboarding needs the relayer on mainnet (no dev wallet there, docs/DEPLOY_MAINNET.md)
+  // and wherever the passkey wallet is switched on.
+  const relayerRequired =
+    network === 'mainnet' || Boolean(process.env.NEXT_PUBLIC_PASSKEY_WALLET_WASM_HASH);
+  const missing = [
+    ...REQUIRED_CONTRACTS.filter((key) => !contracts[key]).map((key) => CONTRACT_ENV[key]),
+    ...(relayerRequired ? relayerUnset : []),
+  ];
+  const warnings: string[] = [];
   if (!contracts.gate) {
-    warnings.push('NEXT_PUBLIC_GATE_CONTRACT_ID is not set — gated quests will be unavailable');
+    warnings.push(`${CONTRACT_ENV.gate} is not set: reputation gates are unavailable`);
   }
-  if (!relayerConfigured && !requiredRelayer) {
-    warnings.push('PASSKEY_RELAYER_URL/PASSKEY_RELAY_API_KEY are not set — passkey onboarding is unavailable');
+  if (!relayerRequired && relayerUnset.length > 0) {
+    warnings.push(
+      `${relayerUnset.join(', ')} not set: passkey onboarding is unavailable (the dev wallet is used)`,
+    );
   }
-  if (!pushConfigured) {
-    warnings.push('NEXT_PUBLIC_VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY are not set — push notifications will be skipped');
+  if (pushUnset.length > 0) {
+    warnings.push(`${pushUnset.join(', ')} not set: push notifications are skipped`);
   }
-
-  if (missingRequired.length > 0) {
-    warnings.unshift(`Missing required config: ${missingRequired.join(', ')}`);
-  }
-
+  checks.missing = missing;
   checks.warnings = warnings;
 
-  const ok = missingRequired.length === 0;
+  const ok = rpcStatus === 'ok' && missing.length === 0;
   return new Response(JSON.stringify({ ok, ...checks }), {
     status: ok ? 200 : 503,
     headers: { 'content-type': 'application/json' },
