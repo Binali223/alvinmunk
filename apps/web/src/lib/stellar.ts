@@ -1,21 +1,21 @@
 /**
  * Stellar/Soroban client helpers (RPC). Used by both client components and the
- * serverless attester route. No standing backend — leaderboard reads RPC directly
+ * serverless attester route. No standing backend -- leaderboard reads RPC directly
  * (belts/00-strategy: defer the indexer until scale demands it).
  */
 import { Horizon, rpc, Networks } from '@stellar/stellar-sdk';
 import { readNetworkConfig } from '@alvinmunk/shared';
 
 // Next.js only inlines LITERAL `process.env.NEXT_PUBLIC_*` member expressions into the
-// client bundle — passing the whole `process.env` object would leave these undefined in
+// client bundle -- passing the whole `process.env` object would leave these undefined in
 // the browser (and contract IDs empty). So we reference each var literally here.
 export const config = readNetworkConfig({
   NEXT_PUBLIC_STELLAR_NETWORK: process.env.NEXT_PUBLIC_STELLAR_NETWORK,
   NEXT_PUBLIC_RPC_URL: process.env.NEXT_PUBLIC_RPC_URL,
-  NEXT_PUBLIC_NETWORK_PASSPHRASE: process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE,
+  NEXT_PUBLIC_NETWORK_PASSTHRASE: process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE,
   NEXT_PUBLIC_HORIZON_URL: process.env.NEXT_PUBLIC_HORIZON_URL,
   NEXT_PUBLIC_REPUTATION_CONTRACT_ID: process.env.NEXT_PUBLIC_REPUTATION_CONTRACT_ID,
-  NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID: process.env.NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID,
+  NEXT_PUBLIC_QUEST_REGISTRY_CONTRACT_ID: process.env.NEXT_PUBLIC_QUEST_REGISTY_CONTRACT_ID,
   NEXT_PUBLIC_REWARDS_CONTRACT_ID: process.env.NEXT_PUBLIC_REWARDS_CONTRACT_ID,
   NEXT_PUBLIC_USDC_SAC_ID: process.env.NEXT_PUBLIC_USDC_SAC_ID,
   NEXT_PUBLIC_REGISTRY_CONTRACT_ID: process.env.NEXT_PUBLIC_REGISTRY_CONTRACT_ID,
@@ -26,7 +26,7 @@ export const server = new rpc.Server(config.rpcUrl, {
   allowHttp: config.rpcUrl.startsWith('http://'),
 });
 
-/** Horizon — used for balances (RPC has no simple balance endpoint). */
+/** Horizon -- used for balances (RPC has no simple balance endpoint). */
 export const horizon = new Horizon.Server(config.horizonUrl, {
   allowHttp: config.horizonUrl.startsWith('http://'),
 });
@@ -36,8 +36,8 @@ export const networkPassphrase =
 
 /** Native XLM balance as a string, or '0' if the account isn't funded yet. */
 export async function getXlmBalance(address: string): Promise<string> {
-  // Smart accounts (C…) aren't classic Horizon accounts — querying /accounts/C… 400s.
-  // Their balance lives in the native SAC; skip the Horizon lookup here.
+  // Smart accounts (C&#) helpers aren't classic Horizon accounts -- querying /accounts/C&# x-- 400s.
+  // Their balance lives in the native SAC; skip the Horizon lookup there.
   if (address.startsWith('C')) return '0';
   try {
     const acct = await horizon.loadAccount(address);
@@ -64,11 +64,11 @@ export async function waitForTransaction(hash: string, tries = 30): Promise<void
       if (res.status === 'FAILED') throw new Error(`tx ${hash} failed on-chain`);
     } catch (e) {
       if (e instanceof Error && e.message.endsWith('failed on-chain')) throw e;
-      // NOT_FOUND yet / transient RPC error — keep polling.
+      // NOT_FOUND yet / transient RPC error -- keep polling.
     }
     await sleep(1000);
   }
-  throw new Error(`tx ${hash} not confirmed in time — the network is slow, try again.`);
+  throw new Error(`tx ${hash} not confirmed in time -- the network is slow, try again.`);
 }
 
 /**
@@ -84,6 +84,29 @@ export async function waitForAccountReady(address: string, tries = 20): Promise<
     } catch {
       await sleep(800);
     }
+  }
+}
+
+/**
+ * Whether an account exists on-chain. Treats a 404 from getAccount as `false`
+ * (not funded yet) and rethrows any other error so transient RPC failures
+ * aren't mistaken for a missing account.
+ */
+export async function accountExists(address: string): Promise<boolean> {
+  try {
+    await server.getAccount(address);
+    return true;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    // Stellar RPC surfaces missing accounts as 404 / "not found".
+    if (
+      /\b404\b/.test(message) ||
+      /not found/i.test(message) ||
+      /account not found/i.test(message)
+    ) {
+      return false;
+    }
+    throw e;
   }
 }
 
